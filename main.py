@@ -15,8 +15,10 @@ Buttons:
   (Open/Close force = POS_TQ_MA position-loop max current, set before each move)
   Compress  : torque mode, dir=1 (CCW), 600mA, motor keeps pressing,
               no auto-brake (exit by Open/Close command)
-  Check     : torque mode, dir=1 (CCW), 600mA, on stall read current position
-              and convert to capacity %, no auto-brake (motor keeps pressing)
+  Check     : torque mode, dir=1 (CCW), 600mA; sample position every 200ms,
+              when position change inside the observation window is small
+              (<= CHECK_DELTA pulses) -> judged stationary -> compute capacity
+              from current position, no auto-brake (motor keeps pressing)
               pos 25000 = 0% , pos 13000 = 100%
 
 IR distance sensor: read on a second UART, default parsing = TFmini/TF-Luna
@@ -87,6 +89,11 @@ COMM_TIMEOUT_MS  = 5000  # motor no-response timeout (motor cmd echo must be
 DEBUG_RX = True          # print raw RX bytes / parsed frames for debugging,
                          # set False once everything works
 
+CHECK_SAMPLES = 5        # stationary judgement window: 5 samples x POLL_MS(200ms)
+                         # = 1s of observation
+CHECK_DELTA   = 10       # max position change (pulses) inside the window,
+                         # <= this -> judged stationary (fully compressed)
+
 # ===================== UI texts / fonts =====================
 # UI is fixed to English: built-in Montserrat fonts have no CJK glyphs
 T = {
@@ -111,8 +118,9 @@ _rx_cnt = 0              # valid ack frame counter (for comm diagnostic)
 
 m = {'pos': None, 'clog': None, 'arrived': None, 'last_rx': 0}   # motor feedback
 g = {'task': None,       # None / 'open' / 'close' / 'compress' / 'check'
-     'phase': 0,         # 0=wait stall 1=wait position ack
+     'phase': 0,         # check task: 0=sampling positions
      't0': 0, 'last_poll': 0, 'phase_t0': 0,
+     'hist': [], 'wait_pos': False,   # check task: position samples / ack pending
      'pending': None}    # pending task (buttons only register, loop executes)
 s = {'last': 0}          # sensor poll timer
 
@@ -358,6 +366,8 @@ def _begin_task(name):
         g['task'] = None
     else:  # check
         _rs485_send(_build_torque(ADDR, DIR_COMPRESS, TORQUE_MA))
+        g['hist'] = []              # reset position sample window
+        g['wait_pos'] = False
         g_cap.set_text(T['cap_checking'])
 
 
@@ -399,26 +409,24 @@ def _task_machine(now):
             g['task'] = None
         return
 
-    # ---- capacity check: wait stall -> read position (no brake, keeps pressing) ----
-    if g['phase'] == 0:
-        if time.ticks_diff(now, g['last_poll']) >= POLL_MS:
-            g['last_poll'] = now
-            _rs485_send(_build_read(ADDR, _F_RD_CLOG))
-        if m['clog'] == 1:                     # cannot press further, read position
-            g['phase'] = 1
-            g['last_poll'] = now
-            m['pos'] = None
-            _rs485_send(_build_read(ADDR, _F_RD_POS))
-
-    elif g['phase'] == 1:                      # wait position ack
-        if m['pos'] is None and time.ticks_diff(now, g['last_poll']) >= POLL_MS:
-            g['last_poll'] = now
-            _rs485_send(_build_read(ADDR, _F_RD_POS))   # retry on timeout
-        if m['pos'] is not None:
-            pct = pos_to_pct(m['pos'])
-            g_cap.set_text('%d %%' % pct)
-            print('check done: pos=%d, capacity=%d%%' % (m['pos'], pct))
-            g['task'] = None
+    # ---- capacity check: sample position while pressing; when the change
+    #      inside the window is small -> judged stationary -> compute capacity
+    #      (no brake, motor keeps pressing) ----
+    if time.ticks_diff(now, g['last_poll']) >= POLL_MS:
+        g['last_poll'] = now
+        g['wait_pos'] = True
+        _rs485_send(_build_read(ADDR, _F_RD_POS))
+    if g['wait_pos'] and m['pos'] is not None:
+        g['wait_pos'] = False
+        hist = g['hist']
+        hist.append(m['pos'])
+        if len(hist) >= CHECK_SAMPLES:
+            win = hist[-CHECK_SAMPLES:]
+            if max(win) - min(win) <= CHECK_DELTA:   # stationary
+                pct = pos_to_pct(win[-1])
+                g_cap.set_text('%d %%' % pct)
+                print('check done: pos=%d, capacity=%d%%' % (win[-1], pct))
+                g['task'] = None
 
 
 # ---------------- IR sensor polling ----------------
