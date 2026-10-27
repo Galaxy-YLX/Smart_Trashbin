@@ -1,24 +1,30 @@
 """
-智能垃圾桶控制 — M5Stack Tab5 (UIFlow2.0 / MicroPython)
-============================================================
-正点原子 PD42S1 | RS485 总线 | 单电机(从机地址 0x01)
+Smart Trashbin Controller - M5Stack Tab5 (UIFlow2.0 / MicroPython)
+====================================================================
+PD42S1 smart stepper motor x1 (ALIENTEK) | RS485 bus | slave addr 0x01
 
-485 接口与协议帧参考自本目录 CPDR.py(已在 Tab5 上验证), 本项目补充:
-  - 绝对位置模式(0xF2)  -> 打开/关闭盖子
-  - 力矩模式(0xF0)      -> 压缩垃圾/容量检测
-  - 读取指令: 0x2A实时位置 / 0x2D堵转标志 / 0x30到位状态
+RS485 interface & protocol frames follow CPDR.py in this folder
+(already verified on Tab5). This project adds:
+  - Absolute position mode (0xF2) -> open / close lid
+  - Torque mode (0xF0)           -> compress trash / capacity check
+  - Read commands: 0x2A position / 0x2D stall flag / 0x30 arrived flag
 
-按键功能:
-  打开盖子 : 绝对位置模式 正转, 加减速150, 速度10RPM, 绝对位置37000
-  关闭盖子 : 绝对位置模式 正转, 加减速150, 速度10RPM, 绝对位置25000
-  压缩垃圾 : 力矩模式 反转, 力矩600mA, 电机保持力矩压紧, 不自动刹车
-  容量检测 : 力矩模式 反转, 力矩600mA, 检测到堵转(压不动)时读当前位置换算
-             容量百分比(不刹车, 电机继续保压), 位置25000=0% 位置13000=100%
+Buttons:
+  Open      : absolute pos mode, dir=0 (CW), acc=150, speed=10RPM, pos=37000
+  Close     : absolute pos mode, dir=0 (CW), acc=150, speed=10RPM, pos=25000
+  Compress  : torque mode, dir=1 (CCW), 600mA, motor keeps pressing,
+              no auto-brake (exit by Open/Close command)
+  Check     : torque mode, dir=1 (CCW), 600mA, on stall read current position
+              and convert to capacity %, no auto-brake (motor keeps pressing)
+              pos 25000 = 0% , pos 13000 = 100%
 
-红外距离传感器: 另开一路串口读取, 默认按 TFmini/TF-Luna 帧解析
-  (59 59 distL distH strL strH mode 00 sum), 其它协议改 SensorParser.parse()
+IR distance sensor: read on a second UART, default parsing = TFmini/TF-Luna
+frame (59 59 distL distH strL strH mode 00 sum); for other protocols modify
+SensorParser.parse().
 
-使用: 复制本文件全部内容到 UIFlow2 的 Python 模式运行。
+Usage: copy the whole file into UIFlow2 Python mode and run.
+NOTE: keep this file pure ASCII - UIFlow2 web editor can corrupt non-ASCII
+characters on paste.
 """
 
 
@@ -28,53 +34,54 @@ from M5 import *
 import m5ui
 import lvgl as lv
 
-# ===================== 协议常量 =====================
-_FHEAD     = 0xC5    # 帧头
-_FTAIL     = 0x5C    # 帧尾
-_F_POS     = 0xF2    # 绝对位置模式运动
-_F_TORQUE  = 0xF0    # 力矩模式运动
-_F_EN      = 0xFA    # 电机使能
-_F_STOP    = 0xFC    # 立即停止
-_F_CLEAR   = 0xFB    # 清除状态(堵转/失败/刹车)
-_F_RD_POS  = 0x2A    # 读实时位置(应答data[0..3]=int32大端)
-_F_RD_CLOG = 0x2D    # 读堵转标志(应答data[0]: 0=未堵转 1=堵转)
-_F_RD_ARV  = 0x30    # 读到位状态(应答data[0]: 0=未到位 1=到位)
+# ===================== protocol constants =====================
+_FHEAD     = 0xC5    # frame head
+_FTAIL     = 0x5C    # frame tail
+_F_POS     = 0xF2    # absolute position mode move
+_F_TORQUE  = 0xF0    # torque mode move
+_F_EN      = 0xFA    # motor enable
+_F_STOP    = 0xFC    # immediate stop (brake)
+_F_CLEAR   = 0xFB    # clear state (stall/fail/brake)
+_F_RD_POS  = 0x2A    # read realtime position (ack data[0..3] = int32 big-endian)
+_F_RD_CLOG = 0x2D    # read stall flag (ack data[0]: 0=not stalled 1=stalled)
+_F_RD_ARV  = 0x30    # read arrived flag (ack data[0]: 0=not arrived 1=arrived)
 
-ADDR = 0x01          # 电机从机地址
+ADDR = 0x01          # motor slave address
 
-# ===================== RS485 引脚 (Tab5, 同CPDR.py) =====================
-_UART = 1            # 串口编号
+# ===================== RS485 pins (Tab5, same as CPDR.py) =====================
+_UART = 1            # UART id
 _TX   = 20
 _RX   = 21
-_DIR  = 34           # DE/RE 方向脚
-CMD_GAP_MS = 50      # 指令间隔(ms), CPDR.py中验证过的最小稳定值
+_DIR  = 34           # DE/RE direction pin
+CMD_GAP_MS = 50      # command gap (ms), minimum stable value verified in CPDR.py
 
-# ===================== 运动参数 =====================
-SPEED = 10           # 速度 (RPM)
-ACC   = 150          # 加减速 (0~200, 0=不加速)
-POS_OPEN   = 37000   # 开盖绝对位置
-POS_CLOSE  = 25000   # 关盖绝对位置
-TORQUE_MA  = 600     # 压缩/容量检测力矩 (mA, 0~3000)
-POS_FULL   = 13000   # 100%容量对应位置
-POS_EMPTY  = 25000   # 0%容量对应位置
+# ===================== motion parameters =====================
+SPEED = 10           # speed (RPM)
+ACC   = 150          # accel/decel (0~200, 0=no ramp)
+POS_OPEN   = 37000   # open lid absolute position
+POS_CLOSE  = 25000   # close lid absolute position
+TORQUE_MA  = 600     # compress/check torque (mA, 0~3000)
+POS_FULL   = 13000   # position for 100% capacity
+POS_EMPTY  = 25000   # position for 0% capacity
 
-# 方向: 0=CW(正转) 1=CCW(反转), 调试时翻转即可
-DIR_OPEN     = 0     # 打开盖子: 正转
-DIR_CLOSE    = 0     # 关闭盖子: 正转
-DIR_COMPRESS = 1     # 压缩/容量检测: 反转
+# direction: 0=CW 1=CCW, flip these during debug if motion direction is wrong
+DIR_OPEN     = 0     # open lid: CW
+DIR_CLOSE    = 0     # close lid: CW
+DIR_COMPRESS = 1     # compress/check: CCW
 
-# ===================== 红外距离传感器串口 =====================
-_SENSOR_UART = 2     # 串口编号(初始化失败可改为0)
+# ===================== IR distance sensor UART =====================
+_SENSOR_UART = 2     # UART id (change to 0 if init fails)
 _SENSOR_TX   = 37    # Tab5 M5-Bus UART0 TXD
-_SENSOR_RX   = 38    # Tab5 M5-Bus UART0 RXD (TXD<->RXD 与传感器交叉)
+_SENSOR_RX   = 38    # Tab5 M5-Bus UART0 RXD (cross TXD<->RXD to the sensor)
 _SENSOR_BAUD = 115200
 
-POLL_MS = 200            # 查询电机状态的间隔
-TASK_TIMEOUT_MS  = 60000 # 任务超时保护
-COMM_TIMEOUT_MS  = 5000  # 电机无应答超时(电机需开启指令应答; 0=关闭此检测)
+POLL_MS = 200            # motor status poll interval
+TASK_TIMEOUT_MS  = 60000 # task timeout protection
+COMM_TIMEOUT_MS  = 5000  # motor no-response timeout (motor cmd echo must be
+                         # enabled; set 0 to disable this check)
 
-# ===================== 界面文本/字体 =====================
-# 界面固定英文: Montserrat内置字体不含中文字形
+# ===================== UI texts / fonts =====================
+# UI is fixed to English: built-in Montserrat fonts have no CJK glyphs
 T = {
     'title': 'Smart Trashbin',
     'lid': 'Lid', 'cap': 'Capacity', 'dist': 'Distance',
@@ -85,29 +92,29 @@ T = {
     'lid_close': 'Closed', 'lid_err': 'Error',
     'cap_na': '-- %', 'cap_checking': 'Checking...', 'dist_na': '-- cm',
 }
-FONT_S   = lv.font_montserrat_24   # 普通字号
-FONT_BIG = lv.font_montserrat_36   # 大字号(标题/容量)
+FONT_S   = lv.font_montserrat_24   # normal size
+FONT_BIG = lv.font_montserrat_36   # big size (title / capacity value)
 
-# ===================== 全局 =====================
+# ===================== globals =====================
 _uart   = None
 _dpin   = None
 _sensor = None
-_rxbuf  = bytearray()    # 电机应答字节流缓冲
-_rx_cnt = 0              # 收到的合法应答帧计数(用于通信诊断)
+_rxbuf  = bytearray()    # motor ack byte stream buffer
+_rx_cnt = 0              # valid ack frame counter (for comm diagnostic)
 
-m = {'pos': None, 'clog': None, 'arrived': None, 'last_rx': 0}   # 电机最新反馈
-g = {'task': None,       # None/'open'/'close'/'compress'/'check'
-     'phase': 0,         # 0=等堵转 1=等位置应答
+m = {'pos': None, 'clog': None, 'arrived': None, 'last_rx': 0}   # motor feedback
+g = {'task': None,       # None / 'open' / 'close' / 'compress' / 'check'
+     'phase': 0,         # 0=wait stall 1=wait position ack
      't0': 0, 'last_poll': 0, 'phase_t0': 0,
-     'pending': None}    # 待执行任务(按键只登记, 主循环执行)
-s = {'last': 0}          # 传感器轮询计时
+     'pending': None}    # pending task (buttons only register, loop executes)
+s = {'last': 0}          # sensor poll timer
 
-g_lid  = None            # 开盖状态标签
-g_cap  = None            # 当前容量标签
-g_dist = None            # 红外距离标签
+g_lid  = None            # lid status label
+g_cap  = None            # capacity label
+g_dist = None            # IR distance label
 
 
-# ===================== RS485 / 协议(同CPDR.py) =====================
+# ===================== RS485 / protocol (same as CPDR.py) =====================
 def _checksum(data):
     s = 0
     for b in data:
@@ -116,21 +123,22 @@ def _checksum(data):
 
 
 def _rs485_send(data):
-    """半双工发送: DIR=1 -> 发 -> 等末字节上线 -> DIR=0 -> 间隔 CMD_GAP_MS"""
+    """Half-duplex send: DIR=1 -> send -> wait last byte on wire -> DIR=0 ->
+    then wait CMD_GAP_MS."""
     _dpin.value(1)
-    time.sleep_us(200)                              # DE 建立时间
-    _uart.write(bytes(data))                        # 非阻塞写入(只进 TX 缓冲)
+    time.sleep_us(200)                              # DE setup time
+    _uart.write(bytes(data))                        # non-blocking write (TX buffer)
     if hasattr(_uart, 'flush'):
-        _uart.flush()                               # 阻塞到真正发完
-        time.sleep_ms(2)                            # 末字节(0x5C)上线余量
+        _uart.flush()                               # block until really sent
+        time.sleep_ms(2)                            # last byte (0x5C) on-wire margin
     else:
-        time.sleep_ms((len(data) * 10 * 1000) // 115200 + 3)  # 无 flush 时按波特率估算
-    _dpin.value(0)                                  # 发完切接收
-    time.sleep_ms(CMD_GAP_MS)                       # 指令间隔
+        time.sleep_ms((len(data) * 10 * 1000) // 115200 + 3)  # no flush: estimate by baud
+    _dpin.value(0)                                  # back to receive
+    time.sleep_ms(CMD_GAP_MS)                       # command gap
 
 
 def _build_pos(addr, direction, acc, speed, pulses):
-    """绝对位置运动帧 (14 字节, 0xF2)"""
+    """Absolute position move frame (14 bytes, 0xF2)."""
     b = bytearray(14)
     b[0] = _FHEAD
     b[1] = addr
@@ -143,14 +151,14 @@ def _build_pos(addr, direction, acc, speed, pulses):
     b[8] = (pulses >> 16) & 0xFF
     b[9] = (pulses >> 8) & 0xFF
     b[10] = pulses & 0xFF
-    b[11] = 0                             # 保留字节, 校验和覆盖它
+    b[11] = 0                             # reserved byte, checksum covers it
     b[12] = _checksum(b[:12])
     b[13] = _FTAIL
     return b
 
 
 def _build_torque(addr, direction, ma):
-    """力矩运动帧 (8 字节, 0xF0)"""
+    """Torque move frame (8 bytes, 0xF0)."""
     b = bytearray(8)
     b[0] = _FHEAD
     b[1] = addr
@@ -164,7 +172,7 @@ def _build_torque(addr, direction, ma):
 
 
 def _build_read(addr, func):
-    """读指令帧 (5 字节)"""
+    """Read command frame (5 bytes)."""
     b = bytearray(5)
     b[0] = _FHEAD
     b[1] = addr
@@ -175,7 +183,7 @@ def _build_read(addr, func):
 
 
 def _build_enable(addr, en):
-    """使能帧 (6 字节): en=0 使能, en=1 失能"""
+    """Enable frame (6 bytes): en=0 enable, en=1 disable."""
     b = bytearray(6)
     b[0] = _FHEAD
     b[1] = addr
@@ -187,16 +195,16 @@ def _build_enable(addr, en):
 
 
 def _build_stop(addr):
-    """立即停止帧 (5 字节)"""
+    """Immediate stop frame (5 bytes)."""
     return _build_read(addr, _F_STOP)
 
 
 def _build_clear(addr):
-    """清除状态帧 (5 字节)"""
+    """Clear state frame (5 bytes)."""
     return _build_read(addr, _F_CLEAR)
 
 
-# ===================== 应答帧解析 =====================
+# ===================== ack frame parsing =====================
 def _feed_rx():
     n = _uart.any()
     if n:
@@ -206,9 +214,9 @@ def _feed_rx():
 
 
 def _next_frame():
-    """从 _rxbuf 切出一帧合法应答, 无则返回 None。
-    应答格式: C5 + 地址 + 功能码 + 错误码(0x01=成功) + 数据 + 校验和 + 5C
-    注意: MicroPython的bytearray不支持del切片, 用切片重新赋值代替。"""
+    """Cut one valid ack frame from _rxbuf, or None.
+    Ack format: C5 + addr + func + err(0x01=ok) + data + checksum + 5C
+    NOTE: MicroPython bytearray has no slice deletion, use re-assignment."""
     global _rxbuf
     while True:
         i = _rxbuf.find(b'\xC5')
@@ -219,7 +227,7 @@ def _next_frame():
             _rxbuf = _rxbuf[i:]
         t = _rxbuf.find(b'\x5C', 1)
         if t < 0:
-            if len(_rxbuf) > 64:            # 头部垃圾数据, 丢掉继续找
+            if len(_rxbuf) > 64:            # garbage at head, drop and keep scanning
                 _rxbuf = _rxbuf[1:]
                 continue
             return None
@@ -236,23 +244,27 @@ def _proc_frames():
         if f is None:
             break
         if f[3] != 0x01:
-            print('电机应答错误码: 0x%02X' % f[3])
+            print('motor ack error: 0x%02X' % f[3])
             continue
         _rx_cnt += 1
         m['last_rx'] = time.ticks_ms()
         func, data = f[2], f[4:-2]
         if func == _F_RD_POS and len(data) >= 4:
-            m['pos'] = int.from_bytes(data[:4], 'big', True)
+            p = (data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3]
+            if p >= 0x80000000:
+                p -= 0x100000000            # signed int32
+            m['pos'] = p
         elif func == _F_RD_CLOG and len(data) >= 1:
             m['clog'] = data[0]
         elif func == _F_RD_ARV and len(data) >= 1:
             m['arrived'] = data[0]
 
 
-# ===================== 红外距离传感器(默认TFmini协议) =====================
+# ===================== IR distance sensor (default TFmini protocol) =====================
 class SensorParser:
-    """TFmini/TF-Luna: 59 59 distL distH strL strH mode 00 sum(前8字节累加低8位)
-    其它协议的传感器只需修改 parse()。"""
+    """TFmini/TF-Luna: 59 59 distL distH strL strH mode 00 sum
+    (checksum = low 8 bits of sum of first 8 bytes).
+    For other sensors just modify parse()."""
     def __init__(self):
         self.buf = bytearray()
 
@@ -264,7 +276,7 @@ class SensorParser:
             i = self.buf.find(b'\x59\x59')
             if i < 0:
                 if len(self.buf) > 1:
-                    self.buf = self.buf[-1:]    # 只留最后1字节(可能是帧头的一半)
+                    self.buf = self.buf[-1:]    # keep last byte (may be half a head)
                 return None
             if i > 0:
                 self.buf = self.buf[i:]
@@ -273,25 +285,25 @@ class SensorParser:
             f = self.buf[:9]
             if f[8] == _checksum(f[:8]):
                 self.buf = self.buf[9:]
-                return f[2] | (f[3] << 8)       # 距离, 单位cm
+                return f[2] | (f[3] << 8)       # distance in cm
             self.buf = self.buf[1:]
 
 
-# ===================== 容量换算 =====================
+# ===================== capacity conversion =====================
 def pos_to_pct(pos):
-    """位置换算容量: 25000=0%, 13000=100%"""
+    """Position to capacity: 25000=0%, 13000=100%"""
     pct = (POS_EMPTY - pos) * 100 // (POS_EMPTY - POS_FULL)
     return max(0, min(100, pct))
 
 
-# ===================== 任务状态机(不阻塞UI) =====================
+# ===================== task state machine (non-blocking UI) =====================
 def _begin_task(name):
     t = time.ticks_ms()
     g.update(task=name, phase=0, t0=t, last_poll=t, phase_t0=t)
     m['pos'] = m['clog'] = m['arrived'] = None
     m['last_rx'] = t
 
-    _rs485_send(_build_clear(ADDR))          # 清掉旧的堵转/刹车状态
+    _rs485_send(_build_clear(ADDR))          # clear old stall/brake state
     if name == 'open':
         _rs485_send(_build_pos(ADDR, DIR_OPEN, ACC, SPEED, POS_OPEN))
         g_lid.set_text(T['lid_opening'])
@@ -299,7 +311,8 @@ def _begin_task(name):
         _rs485_send(_build_pos(ADDR, DIR_CLOSE, ACC, SPEED, POS_CLOSE))
         g_lid.set_text(T['lid_closing'])
     elif name == 'compress':
-        # 压缩: 只发一次力矩指令, 电机保持力矩压紧, 不刹车(由开关盖指令退出)
+        # compress: send torque once, motor keeps pressing, no brake
+        # (exit by Open/Close command)
         _rs485_send(_build_torque(ADDR, DIR_COMPRESS, TORQUE_MA))
         print('compress: torque %dmA hold, exit by open/close' % TORQUE_MA)
         g['task'] = None
@@ -309,7 +322,8 @@ def _begin_task(name):
 
 
 def _abort_task(reason):
-    """仅异常保护(超时/电机无应答)时强制刹车; 正常压缩/容量检测不会走到这里。"""
+    """Force brake only for error protection (timeout / motor no response).
+    Normal compress/check never reaches here."""
     _rs485_send(_build_stop(ADDR))
     _rs485_send(_build_clear(ADDR))
     if g['task'] in ('open', 'close'):
@@ -324,18 +338,18 @@ def _task_machine(now):
     if g['task'] is None:
         return
 
-    # 通信看门狗: 任务中一直收不到电机应答
+    # comm watchdog: no motor ack while a task is running
     if COMM_TIMEOUT_MS and time.ticks_diff(now, m['last_rx']) > COMM_TIMEOUT_MS:
-        _abort_task('电机无应答, 检查485接线/从机地址/是否开启指令应答(0x6F=1)')
+        _abort_task('motor no response, check 485 wiring/addr/cmd echo (0x6F=1)')
         return
 
     if time.ticks_diff(now, g['t0']) > TASK_TIMEOUT_MS:
-        _abort_task('超时')
+        _abort_task('timeout')
         return
 
     task = g['task']
 
-    # ---- 开盖/关盖: 等到位 ----
+    # ---- open/close: wait arrived ----
     if task in ('open', 'close'):
         if time.ticks_diff(now, g['last_poll']) >= POLL_MS:
             g['last_poll'] = now
@@ -345,21 +359,21 @@ def _task_machine(now):
             g['task'] = None
         return
 
-    # ---- 容量检测: 等堵转 -> 读位置(不刹车, 电机继续保压) ----
+    # ---- capacity check: wait stall -> read position (no brake, keeps pressing) ----
     if g['phase'] == 0:
         if time.ticks_diff(now, g['last_poll']) >= POLL_MS:
             g['last_poll'] = now
             _rs485_send(_build_read(ADDR, _F_RD_CLOG))
-        if m['clog'] == 1:                     # 压不动了, 直接读位置
+        if m['clog'] == 1:                     # cannot press further, read position
             g['phase'] = 1
             g['last_poll'] = now
             m['pos'] = None
             _rs485_send(_build_read(ADDR, _F_RD_POS))
 
-    elif g['phase'] == 1:                      # 等位置应答
+    elif g['phase'] == 1:                      # wait position ack
         if m['pos'] is None and time.ticks_diff(now, g['last_poll']) >= POLL_MS:
             g['last_poll'] = now
-            _rs485_send(_build_read(ADDR, _F_RD_POS))   # 超时重发
+            _rs485_send(_build_read(ADDR, _F_RD_POS))   # retry on timeout
         if m['pos'] is not None:
             pct = pos_to_pct(m['pos'])
             g_cap.set_text('%d %%' % pct)
@@ -367,7 +381,7 @@ def _task_machine(now):
             g['task'] = None
 
 
-# ---------------- 红外传感器轮询 ----------------
+# ---------------- IR sensor polling ----------------
 def _sensor_poll(now):
     if _sensor is None:
         return
@@ -384,16 +398,16 @@ def _sensor_poll(now):
         g_dist.set_text('%d cm' % dist)
 
 
-# ===================== UI 回调 =====================
+# ===================== UI callbacks =====================
 def _make_task_cb(name):
     def cb(e):
         if e.code == lv.EVENT.CLICKED:
             if g['task'] is None and g['pending'] is None:
-                g['pending'] = name          # 只登记, 主循环里执行
+                g['pending'] = name          # register only, loop executes
     return cb
 
 
-# ===================== 入口 =====================
+# ===================== entry =====================
 def setup():
     global _uart, _dpin, _sensor, _sparser, g_lid, g_cap, g_dist
 
@@ -403,12 +417,12 @@ def setup():
 
     page = m5ui.M5Page(bg_c=0x1A1A2E)
 
-    # 标题
+    # title
     m5ui.M5Label(text=T['title'], x=430, y=25,
                  text_c=0xFFFFFF, bg_c=0x1A1A2E, bg_opa=0,
                  font=FONT_BIG, parent=page)
 
-    # 开盖状态
+    # lid status
     m5ui.M5Label(text=T['lid'], x=120, y=110,
                  text_c=0xAAAAAA, bg_c=0x1A1A2E, bg_opa=0,
                  font=FONT_S, parent=page)
@@ -417,7 +431,7 @@ def setup():
                          font=FONT_S, parent=page)
     g_lid.set_size(300, 46)
 
-    # 当前容量
+    # capacity
     m5ui.M5Label(text=T['cap'], x=120, y=190,
                  text_c=0xAAAAAA, bg_c=0x1A1A2E, bg_opa=0,
                  font=FONT_S, parent=page)
@@ -426,7 +440,7 @@ def setup():
                          font=FONT_BIG, parent=page)
     g_cap.set_size(300, 60)
 
-    # 红外距离
+    # IR distance
     m5ui.M5Label(text=T['dist'], x=120, y=280,
                  text_c=0xAAAAAA, bg_c=0x1A1A2E, bg_opa=0,
                  font=FONT_S, parent=page)
@@ -435,7 +449,7 @@ def setup():
                           font=FONT_S, parent=page)
     g_dist.set_size(300, 46)
 
-    # ---- 2x2 功能按键 ----
+    # ---- 2x2 function buttons ----
     btns = [
         (T['btn_open'],     100, 380, 0x0E6655, _make_task_cb('open')),
         (T['btn_close'],    660, 380, 0x1A5276, _make_task_cb('close')),
@@ -450,19 +464,19 @@ def setup():
 
     page.screen_load()
 
-    # ---- RS485 初始化 + 上电使能电机 ----
+    # ---- RS485 init + enable motor on boot ----
     _uart = machine.UART(_UART, tx=_TX, rx=_RX,
                          baudrate=115200, bits=8, parity=None, stop=1)
     _dpin = machine.Pin(_DIR, machine.Pin.OUT, value=0)
-    _rs485_send(_build_enable(ADDR, 0))     # en=0 使能
+    _rs485_send(_build_enable(ADDR, 0))     # en=0 enable
 
-    # ---- 红外传感器串口(初始化失败不阻塞主程序) ----
+    # ---- IR sensor UART (init failure must not block the program) ----
     try:
         _sensor = machine.UART(_SENSOR_UART, tx=_SENSOR_TX, rx=_SENSOR_RX,
                                baudrate=_SENSOR_BAUD, bits=8, parity=None, stop=1)
         _sparser = SensorParser()
     except Exception as e:
-        print('传感器串口初始化失败(可改 _SENSOR_UART 编号):', e)
+        print('sensor UART init failed (change _SENSOR_UART):', e)
         _sensor = None
 
     print('SmartTrashbin ready. SPEED=%dRPM ACC=%d' % (SPEED, ACC))
