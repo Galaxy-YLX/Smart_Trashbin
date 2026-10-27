@@ -225,7 +225,10 @@ def _build_set_pos_torque(addr, ma):
 
 
 def _build_set_echo(addr, echo):
-    """Set command echo frame (6 bytes, 0x6F): 1=respond to commands, 0=silent."""
+    """Set command echo frame (6 bytes, 0x6F).
+    WARNING: on this motor unit 0x6F with data=1 turned echo OFF (semantics
+    inverted vs the STM32 example comment). The motor replies by default,
+    so this command is NOT sent at boot."""
     b = bytearray(6)
     b[0] = _FHEAD
     b[1] = addr
@@ -517,7 +520,8 @@ def setup():
                          baudrate=115200, bits=8, parity=None, stop=1)
     _dpin = machine.Pin(_DIR, machine.Pin.OUT, value=0)
     _rs485_send(_build_enable(ADDR, 0))     # en=0 enable
-    _rs485_send(_build_set_echo(ADDR, 1))   # force cmd echo ON (we need acks)
+    # NOTE: do NOT send 0x6F here - on this unit 0x6F=1 turns echo OFF,
+    # and the motor replies by default anyway
 
     # ---- IR sensor UART (init failure must not block the program) ----
     try:
