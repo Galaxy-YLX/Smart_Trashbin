@@ -42,6 +42,7 @@ _F_POS     = 0xF2    # absolute position mode move
 _F_TORQUE  = 0xF0    # torque mode move
 _F_POS_TQ  = 0x64    # set position-loop max current (force of pos moves)
 _F_EN      = 0xFA    # motor enable
+_F_ECHO    = 0x6F    # set command echo (1=respond to commands, 0=silent)
 _F_STOP    = 0xFC    # immediate stop (brake)
 _F_CLEAR   = 0xFB    # clear state (stall/fail/brake)
 _F_RD_POS  = 0x2A    # read realtime position (ack data[0..3] = int32 big-endian)
@@ -83,6 +84,8 @@ POLL_MS = 200            # motor status poll interval
 TASK_TIMEOUT_MS  = 60000 # task timeout protection
 COMM_TIMEOUT_MS  = 5000  # motor no-response timeout (motor cmd echo must be
                          # enabled; set 0 to disable this check)
+DEBUG_RX = True          # print raw RX bytes / parsed frames for debugging,
+                         # set False once everything works
 
 # ===================== UI texts / fonts =====================
 # UI is fixed to English: built-in Montserrat fonts have no CJK glyphs
@@ -133,10 +136,11 @@ def _rs485_send(data):
     time.sleep_us(200)                              # DE setup time
     _uart.write(bytes(data))                        # non-blocking write (TX buffer)
     if hasattr(_uart, 'flush'):
-        _uart.flush()                               # block until really sent
-        time.sleep_ms(2)                            # last byte (0x5C) on-wire margin
+        _uart.flush()                               # block until last byte is on wire
+        time.sleep_us(100)                          # tiny margin, then release bus ASAP
+                                                    # (late release = motor reply collides)
     else:
-        time.sleep_ms((len(data) * 10 * 1000) // 115200 + 3)  # no flush: estimate by baud
+        time.sleep_ms((len(data) * 10 * 1000) // 115200 + 1)  # no flush: estimate by baud
     _dpin.value(0)                                  # back to receive
     time.sleep_ms(CMD_GAP_MS)                       # command gap
 
@@ -212,6 +216,18 @@ def _build_set_pos_torque(addr, ma):
     return b
 
 
+def _build_set_echo(addr, echo):
+    """Set command echo frame (6 bytes, 0x6F): 1=respond to commands, 0=silent."""
+    b = bytearray(6)
+    b[0] = _FHEAD
+    b[1] = addr
+    b[2] = _F_ECHO
+    b[3] = echo
+    b[4] = _checksum(b[:4])
+    b[5] = _FTAIL
+    return b
+
+
 def _build_stop(addr):
     """Immediate stop frame (5 bytes)."""
     return _build_read(addr, _F_STOP)
@@ -229,6 +245,8 @@ def _feed_rx():
         d = _uart.read(n)
         if d:
             _rxbuf.extend(d)
+            if DEBUG_RX:
+                print('RX raw: ' + ' '.join('%02X' % b for b in d))
 
 
 def _next_frame():
@@ -261,6 +279,8 @@ def _proc_frames():
         f = _next_frame()
         if f is None:
             break
+        if DEBUG_RX:
+            print('frame: ' + ' '.join('%02X' % b for b in f))
         if f[3] != 0x01:
             print('motor ack error: 0x%02X' % f[3])
             continue
@@ -489,6 +509,7 @@ def setup():
                          baudrate=115200, bits=8, parity=None, stop=1)
     _dpin = machine.Pin(_DIR, machine.Pin.OUT, value=0)
     _rs485_send(_build_enable(ADDR, 0))     # en=0 enable
+    _rs485_send(_build_set_echo(ADDR, 1))   # force cmd echo ON (we need acks)
 
     # ---- IR sensor UART (init failure must not block the program) ----
     try:
