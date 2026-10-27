@@ -14,6 +14,8 @@ Buttons:
              pos=37000
   Close    : absolute pos mode, dir=0 (CW), acc=150, speed=10RPM,
              pos=25000
+  (Open/Close completion = same stationary judgement as Check:
+   position stops changing AND is within TARGET_TOL of the target)
   Compress : torque mode, dir=1 (CCW), 600mA, motor keeps pressing,
              no auto-brake (exit by Open/Close command)
   Check    : torque mode, dir=1 (CCW), 600mA; sample position every
@@ -97,6 +99,9 @@ CHECK_SAMPLES = 5        # stationary window: 5 samples x POLL_MS
                          # = 1s of observation
 CHECK_DELTA   = 10       # max position change (pulses) inside the
                          # window, <= this -> judged stationary
+TARGET_TOL    = 300      # success band (pulses) around the target
+                         # position: stationary within this band
+                         # = open/close succeeded
 
 # ===================== UI texts / fonts =====================
 # UI is fixed to English: Montserrat fonts have no CJK glyphs
@@ -368,6 +373,8 @@ def _begin_task(name):
     g.update(task=name, phase=0, t0=t, last_poll=t, phase_t0=t)
     m['pos'] = m['clog'] = m['arrived'] = None
     m['last_rx'] = t
+    g['hist'] = []              # reset position sample window
+    g['wait_pos'] = False
 
     # clear old stall/brake state
     _rs485_send(_build_clear(ADDR))
@@ -391,8 +398,6 @@ def _begin_task(name):
     else:
         # check
         _rs485_send(_build_torque(ADDR, DIR_COMPRESS, TORQUE_MA))
-        g['hist'] = []              # reset position sample window
-        g['wait_pos'] = False
         g_cap.set_text(T['cap_checking'])
 
 
@@ -426,17 +431,34 @@ def _task_machine(now):
 
     task = g['task']
 
-    # ---- open/close: wait arrived ----
+    # ---- open/close ----
+    # Same stationary judgement as capacity check: sample position,
+    # when stationary AND within TARGET_TOL of the target position
+    # -> success.
     if task in ('open', 'close'):
+        target = POS_OPEN if task == 'open' else POS_CLOSE
         if time.ticks_diff(now, g['last_poll']) >= POLL_MS:
             g['last_poll'] = now
-            _rs485_send(_build_read(ADDR, _F_RD_ARV))
-        if m['arrived'] == 1:
-            if task == 'open':
-                g_lid.set_text(T['lid_open'])
-            else:
-                g_lid.set_text(T['lid_close'])
-            g['task'] = None
+            g['wait_pos'] = True
+            _rs485_send(_build_read(ADDR, _F_RD_POS))
+        if g['wait_pos'] and m['pos'] is not None:
+            g['wait_pos'] = False
+            hist = g['hist']
+            hist.append(m['pos'])
+            if len(hist) >= CHECK_SAMPLES:
+                win = hist[-CHECK_SAMPLES:]
+                # stationary: max-min within window <= CHECK_DELTA
+                if max(win) - min(win) <= CHECK_DELTA:
+                    if abs(win[-1] - target) <= TARGET_TOL:
+                        # stationary near target -> success
+                        if task == 'open':
+                            g_lid.set_text(T['lid_open'])
+                        else:
+                            g_lid.set_text(T['lid_close'])
+                        g['task'] = None
+                    else:
+                        # stationary but far from target -> blocked
+                        _abort_task('stalled away from target')
         return
 
     # ---- capacity check ----
