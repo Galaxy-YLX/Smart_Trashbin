@@ -12,6 +12,7 @@ RS485 interface & protocol frames follow CPDR.py in this folder
 Buttons:
   Open      : absolute pos mode, dir=0 (CW), acc=150, speed=10RPM, pos=37000
   Close     : absolute pos mode, dir=0 (CW), acc=150, speed=10RPM, pos=25000
+  (Open/Close force = POS_TQ_MA position-loop max current, set before each move)
   Compress  : torque mode, dir=1 (CCW), 600mA, motor keeps pressing,
               no auto-brake (exit by Open/Close command)
   Check     : torque mode, dir=1 (CCW), 600mA, on stall read current position
@@ -39,6 +40,7 @@ _FHEAD     = 0xC5    # frame head
 _FTAIL     = 0x5C    # frame tail
 _F_POS     = 0xF2    # absolute position mode move
 _F_TORQUE  = 0xF0    # torque mode move
+_F_POS_TQ  = 0x64    # set position-loop max current (force of pos moves)
 _F_EN      = 0xFA    # motor enable
 _F_STOP    = 0xFC    # immediate stop (brake)
 _F_CLEAR   = 0xFB    # clear state (stall/fail/brake)
@@ -61,6 +63,8 @@ ACC   = 150          # accel/decel (0~200, 0=no ramp)
 POS_OPEN   = 37000   # open lid absolute position
 POS_CLOSE  = 25000   # close lid absolute position
 TORQUE_MA  = 600     # compress/check torque (mA, 0~3000)
+POS_TQ_MA  = 600     # open/close force: position-loop max current (100~3000mA),
+                     # raise this if the lid is too weak to open
 POS_FULL   = 13000   # position for 100% capacity
 POS_EMPTY  = 25000   # position for 0% capacity
 
@@ -194,6 +198,20 @@ def _build_enable(addr, en):
     return b
 
 
+def _build_set_pos_torque(addr, ma):
+    """Set position-loop max current frame (7 bytes, 0x64).
+    This is the force limit of absolute-position moves, range 100~3000mA."""
+    b = bytearray(7)
+    b[0] = _FHEAD
+    b[1] = addr
+    b[2] = _F_POS_TQ
+    b[3] = (ma >> 8) & 0xFF
+    b[4] = ma & 0xFF
+    b[5] = _checksum(b[:5])
+    b[6] = _FTAIL
+    return b
+
+
 def _build_stop(addr):
     """Immediate stop frame (5 bytes)."""
     return _build_read(addr, _F_STOP)
@@ -305,9 +323,11 @@ def _begin_task(name):
 
     _rs485_send(_build_clear(ADDR))          # clear old stall/brake state
     if name == 'open':
+        _rs485_send(_build_set_pos_torque(ADDR, POS_TQ_MA))  # set open force
         _rs485_send(_build_pos(ADDR, DIR_OPEN, ACC, SPEED, POS_OPEN))
         g_lid.set_text(T['lid_opening'])
     elif name == 'close':
+        _rs485_send(_build_set_pos_torque(ADDR, POS_TQ_MA))  # set close force
         _rs485_send(_build_pos(ADDR, DIR_CLOSE, ACC, SPEED, POS_CLOSE))
         g_lid.set_text(T['lid_closing'])
     elif name == 'compress':
