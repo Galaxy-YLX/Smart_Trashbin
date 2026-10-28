@@ -547,47 +547,47 @@ def setup():
     page = m5ui.M5Page(bg_c=0x1A1A2E)
 
     # ---- title (720px portrait width, roughly centered) ----
-    m5ui.M5Label(text=T['title'], x=230, y=25,
+    m5ui.M5Label(text=T['title'], x=230, y=15,
                  text_c=0xFFFFFF, bg_c=0x1A1A2E, bg_opa=0,
                  font=FONT_BIG, parent=page)
 
     # ---- status rows: label left, value right ----
     # lid status
-    m5ui.M5Label(text=T['lid'], x=40, y=100,
+    m5ui.M5Label(text=T['lid'], x=40, y=80,
                  text_c=0xAAAAAA, bg_c=0x1A1A2E, bg_opa=0,
                  font=FONT_S, parent=page)
-    g_lid = m5ui.M5Label(text=T['lid_unknown'], x=200, y=94,
+    g_lid = m5ui.M5Label(text=T['lid_unknown'], x=200, y=74,
                          text_c=0x00E676, bg_c=0x2A2A3E,
                          bg_opa=255, font=FONT_S, parent=page)
-    g_lid.set_size(480, 46)
+    g_lid.set_size(480, 44)
 
     # capacity
-    m5ui.M5Label(text=T['cap'], x=40, y=190,
+    m5ui.M5Label(text=T['cap'], x=40, y=140,
                  text_c=0xAAAAAA, bg_c=0x1A1A2E, bg_opa=0,
                  font=FONT_S, parent=page)
-    g_cap = m5ui.M5Label(text=T['cap_na'], x=200, y=178,
+    g_cap = m5ui.M5Label(text=T['cap_na'], x=200, y=128,
                          text_c=0xFFD600, bg_c=0x2A2A3E,
                          bg_opa=255, font=FONT_BIG, parent=page)
     g_cap.set_size(480, 60)
 
     # IR distance
-    m5ui.M5Label(text=T['dist'], x=40, y=290,
+    m5ui.M5Label(text=T['dist'], x=40, y=215,
                  text_c=0xAAAAAA, bg_c=0x1A1A2E, bg_opa=0,
                  font=FONT_S, parent=page)
-    g_dist = m5ui.M5Label(text=T['dist_na'], x=200, y=284,
+    g_dist = m5ui.M5Label(text=T['dist_na'], x=200, y=209,
                           text_c=0xFFFFFF, bg_c=0x2A2A3E,
                           bg_opa=255, font=FONT_S, parent=page)
-    g_dist.set_size(480, 46)
+    g_dist.set_size(480, 44)
 
-    # ---- 2x2 function buttons (compact, upper area) ----
+    # ---- 2x2 function buttons (all inside upper half: y <= 640) ----
     btns = [
-        (T['btn_open'], 40, 390, 0x0E6655, 'open'),
-        (T['btn_close'], 370, 390, 0x1A5276, 'close'),
-        (T['btn_compress'], 40, 550, 0x7D6608, 'compress'),
-        (T['btn_check'], 370, 550, 0x6C3483, 'check'),
+        (T['btn_open'], 40, 300, 0x0E6655, 'open'),
+        (T['btn_close'], 370, 300, 0x1A5276, 'close'),
+        (T['btn_compress'], 40, 470, 0x7D6608, 'compress'),
+        (T['btn_check'], 370, 470, 0x6C3483, 'check'),
     ]
     for text, x, y, color, name in btns:
-        btn = m5ui.M5Button(text=text, x=x, y=y, w=310, h=140,
+        btn = m5ui.M5Button(text=text, x=x, y=y, w=310, h=150,
                             text_c=0xFFFFFF, bg_c=color,
                             font=FONT_S, parent=page)
         btn.add_event_cb(_make_task_cb(name), lv.EVENT.ALL, None)
