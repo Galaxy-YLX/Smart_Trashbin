@@ -85,7 +85,7 @@ DIR_COMPRESS = 1     # compress/check: CCW
 _SENSOR_UART = 2     # UART id (change to 0 if init fails)
 _SENSOR_TX   = 37    # Tab5 M5-Bus UART0 TXD
 _SENSOR_RX   = 38    # Tab5 M5-Bus UART0 RXD (cross to sensor)
-_SENSOR_BAUD = 115200
+_SENSOR_BAUD = 921600
 
 POLL_MS = 200            # motor status poll interval
 TASK_TIMEOUT_MS  = 60000 # task timeout protection
