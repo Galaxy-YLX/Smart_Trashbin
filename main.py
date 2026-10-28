@@ -29,6 +29,9 @@ IR distance sensor: DTOF-2510 ToF on a second UART. It reports
 ASCII lines 'distance_mm,confidence\n' (distance = float mm,
 confidence = int 0~1000). For others modify SensorParser.parse().
 
+Auto lid: hand <=200mm -> open; hand leaves -> close after 3s;
+if distance >300mm and the lid is still open -> close at once.
+
 Usage: copy the whole file into UIFlow2 Python mode and run.
 NOTE: keep this file pure ASCII - UIFlow2 web editor can corrupt
 non-ASCII characters on paste. All lines are kept <= 72 chars so
@@ -88,6 +91,7 @@ _SENSOR_RX   = 38    # Tab5 M5-Bus UART0 RXD (cross to sensor)
 _SENSOR_BAUD = 921600
 AUTO_OPEN_MM  = 200    # auto-open when distance <= 200mm (20cm)
 AUTO_CLOSE_MS = 3000   # auto-close 3s after hand leaves
+AUTO_CLOSE_MM = 300    # far-away: >300mm and lid open -> close
 
 POLL_MS = 200            # motor status poll interval
 TASK_TIMEOUT_MS  = 60000 # task timeout protection
@@ -136,6 +140,7 @@ g = {
     'hist': [],          # check task: position samples
     'wait_pos': False,   # check task: position ack pending
     'pending': None,     # task registered by a button press
+    'lid_open': False,   # lid currently open (auto-close check)
 }
 s = {'last': 0, 'near': False, 'left_t': 0}  # sensor poll + auto lid
 
@@ -393,6 +398,7 @@ def _begin_task(name):
         _rs485_send(_build_pos(ADDR, DIR_CLOSE, ACC, SPEED, POS_CLOSE))
         g_lid.set_text(T['lid_closing'])
     elif name == 'compress':
+        g['lid_open'] = False   # pressing down -> lid not open
         # send torque once, motor keeps pressing, no brake
         # (exit by Open/Close command)
         _rs485_send(_build_torque(ADDR, DIR_COMPRESS, TORQUE_MA))
@@ -401,6 +407,7 @@ def _begin_task(name):
         g['task'] = None
     else:
         # check
+        g['lid_open'] = False   # pressing down -> lid not open
         _rs485_send(_build_torque(ADDR, DIR_COMPRESS, TORQUE_MA))
         g_cap.set_text(T['cap_checking'])
 
@@ -457,8 +464,10 @@ def _task_machine(now):
                         # stationary near target -> success
                         if task == 'open':
                             g_lid.set_text(T['lid_open'])
+                            g['lid_open'] = True
                         else:
                             g_lid.set_text(T['lid_close'])
+                            g['lid_open'] = False
                         g['task'] = None
                     else:
                         # stationary but far from target -> blocked
@@ -524,6 +533,13 @@ def _sensor_poll(now):
             # object just left range -> arm auto-close timer
             s['left_t'] = now
         s['near'] = near
+
+        # safety close: nothing within 300mm and lid still open
+        # -> close immediately (do not wait for AUTO_CLOSE_MS)
+        if dist > AUTO_CLOSE_MM and g['lid_open']:
+            s['left_t'] = 0
+            if g['task'] is None and g['pending'] is None:
+                g['pending'] = 'close'
 
 
 # ===================== UI callbacks =====================
