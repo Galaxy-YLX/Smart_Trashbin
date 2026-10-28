@@ -30,7 +30,8 @@ ASCII lines 'distance_mm,confidence\n' (distance = float mm,
 confidence = int 0~1000). For others modify SensorParser.parse().
 
 Auto lid: hand <=200mm -> open; hand leaves -> close after 3s;
-if distance >300mm and the lid is still open -> close at once.
+every 3s also check: if distance >300mm and lid still open ->
+start a 3s auto-close countdown.
 
 Usage: copy the whole file into UIFlow2 Python mode and run.
 NOTE: keep this file pure ASCII - UIFlow2 web editor can corrupt
@@ -91,7 +92,8 @@ _SENSOR_RX   = 38    # Tab5 M5-Bus UART0 RXD (cross to sensor)
 _SENSOR_BAUD = 921600
 AUTO_OPEN_MM  = 200    # auto-open when distance <= 200mm (20cm)
 AUTO_CLOSE_MS = 3000   # auto-close 3s after hand leaves
-AUTO_CLOSE_MM = 300    # far-away: >300mm and lid open -> close
+AUTO_CLOSE_MM = 300    # far-away: >300mm and lid open -> 3s close
+CHECK_LID_MS  = 3000   # lid-open safety check period (every 3s)
 
 POLL_MS = 200            # motor status poll interval
 TASK_TIMEOUT_MS  = 60000 # task timeout protection
@@ -142,7 +144,7 @@ g = {
     'pending': None,     # task registered by a button press
     'lid_open': False,   # lid currently open (auto-close check)
 }
-s = {'last': 0, 'near': False, 'left_t': 0}  # sensor poll + auto lid
+s = {'last': 0, 'near': False, 'left_t': 0, 'chk_t': 0}  # sensor/auto lid
 
 g_lid  = None            # lid status label
 g_cap  = None            # capacity label
@@ -534,12 +536,14 @@ def _sensor_poll(now):
             s['left_t'] = now
         s['near'] = near
 
-        # safety close: nothing within 300mm and lid still open
-        # -> close immediately (do not wait for AUTO_CLOSE_MS)
-        if dist > AUTO_CLOSE_MM and g['lid_open']:
-            s['left_t'] = 0
-            if g['task'] is None and g['pending'] is None:
-                g['pending'] = 'close'
+        # periodic lid-open safety check (every CHECK_LID_MS):
+        # >300mm and lid still open -> start 3s auto-close countdown
+        if time.ticks_diff(now, s['chk_t']) >= CHECK_LID_MS:
+            s['chk_t'] = now
+            if (dist > AUTO_CLOSE_MM and g['lid_open']
+                    and g['task'] is None and g['pending'] is None
+                    and not s['left_t']):
+                s['left_t'] = now
 
 
 # ===================== UI callbacks =====================
