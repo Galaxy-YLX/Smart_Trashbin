@@ -541,7 +541,7 @@ def setup():
     global g_lid, g_cap, g_dist
 
     M5.begin()
-    Widgets.setRotation(1)    # Tab5 portrait 720x1280 (3 if upside-down)
+    Widgets.setRotation(0)    # portrait 720x1280 (counterclockwise 90)
     m5ui.init()
 
     page = m5ui.M5Page(bg_c=0x1A1A2E)
