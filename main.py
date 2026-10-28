@@ -496,7 +496,12 @@ def _sensor_poll(now):
         d = _sensor.read(n)
         if d:
             _sparser.feed(d)
-    dist = _sparser.parse()
+    dist = None
+    while True:
+        d = _sparser.parse()
+        if d is None:
+            break
+        dist = d            # keep the newest distance
     if dist is not None:
         g_dist.set_text('%d cm' % dist)
 
