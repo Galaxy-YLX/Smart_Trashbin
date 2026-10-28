@@ -25,9 +25,9 @@ Buttons:
              no auto-brake (motor keeps pressing)
              pos 25000 = 0% , pos 13000 = 100%
 
-IR distance sensor: read on a second UART, default parsing =
-TFmini/TF-Luna frame (59 59 distL distH strL strH mode 00 sum);
-for other protocols modify SensorParser.parse().
+IR distance sensor: DTOF-2510 ToF on a second UART. It reports
+ASCII lines 'distance_mm,confidence\n' (distance = float mm,
+confidence = int 0~1000). For others modify SensorParser.parse().
 
 Usage: copy the whole file into UIFlow2 Python mode and run.
 NOTE: keep this file pure ASCII - UIFlow2 web editor can corrupt
@@ -114,7 +114,7 @@ T = {
     'lid_closing': 'Closing...', 'lid_open': 'Opened',
     'lid_close': 'Closed', 'lid_err': 'Error',
     'cap_na': '-- %', 'cap_checking': 'Checking...',
-    'dist_na': '-- cm',
+    'dist_na': '-- mm',
 }
 FONT_S   = lv.font_montserrat_24   # normal size
 FONT_BIG = lv.font_montserrat_36   # big size (title / capacity)
@@ -330,11 +330,11 @@ def _proc_frames():
             m['arrived'] = data[0]
 
 
-# ============ IR distance sensor (default TFmini) ============
+# ============ IR distance sensor (DTOF-2510 ToF) ============
 class SensorParser:
-    """TFmini/TF-Luna: 59 59 distL distH strL strH mode 00 sum
-    (checksum = low 8 bits of sum of first 8 bytes).
-    For other sensors just modify parse()."""
+    """DTOF-2510 reports ASCII lines 'distance_mm,confidence\n'.
+    distance = float mm, confidence = int 0~1000. parse() returns
+    distance in mm. For other sensors just modify parse()."""
     def __init__(self):
         self.buf = bytearray()
 
@@ -343,21 +343,23 @@ class SensorParser:
 
     def parse(self):
         while True:
-            i = self.buf.find(b'\x59\x59')
+            i = self.buf.find(b'\n')
             if i < 0:
-                if len(self.buf) > 1:
-                    # keep last byte (may be half a head)
-                    self.buf = self.buf[-1:]
+                if len(self.buf) > 64:
+                    self.buf = bytearray()  # junk with no newline
                 return None
-            if i > 0:
-                self.buf = self.buf[i:]
-            if len(self.buf) < 9:
-                return None
-            f = self.buf[:9]
-            if f[8] == _checksum(f[:8]):
-                self.buf = self.buf[9:]
-                return f[2] | (f[3] << 8)   # distance in cm
-            self.buf = self.buf[1:]
+            line = bytes(self.buf[:i])
+            self.buf = self.buf[i + 1:]
+            j = line.find(b',')
+            if j <= 0:
+                continue
+            try:
+                dist_mm = int(float(line[:j].decode().strip()) + 0.5)
+            except ValueError:
+                continue
+            if dist_mm < 20 or dist_mm > 10000:
+                continue
+            return dist_mm
 
 
 # ===================== capacity conversion =====================
@@ -503,7 +505,7 @@ def _sensor_poll(now):
             break
         dist = d            # keep the newest distance
     if dist is not None:
-        g_dist.set_text('%d cm' % dist)
+        g_dist.set_text('%d mm' % dist)
 
 
 # ===================== UI callbacks =====================
