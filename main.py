@@ -86,6 +86,7 @@ _SENSOR_UART = 2     # UART id (change to 0 if init fails)
 _SENSOR_TX   = 37    # Tab5 M5-Bus UART0 TXD
 _SENSOR_RX   = 38    # Tab5 M5-Bus UART0 RXD (cross to sensor)
 _SENSOR_BAUD = 921600
+AUTO_OPEN_MM = 200   # auto-open when distance <= 200mm (20cm)
 
 POLL_MS = 200            # motor status poll interval
 TASK_TIMEOUT_MS  = 60000 # task timeout protection
@@ -135,7 +136,7 @@ g = {
     'wait_pos': False,   # check task: position ack pending
     'pending': None,     # task registered by a button press
 }
-s = {'last': 0}          # sensor poll timer
+s = {'last': 0, 'near': False}   # sensor poll timer / auto-open flag
 
 g_lid  = None            # lid status label
 g_cap  = None            # capacity label
@@ -506,6 +507,12 @@ def _sensor_poll(now):
         dist = d            # keep the newest distance
     if dist is not None:
         g_dist.set_text('%d mm' % dist)
+        near = dist <= AUTO_OPEN_MM
+        # auto-open: falling edge on "object within range"
+        if near and not s['near']:
+            if g['task'] is None and g['pending'] is None:
+                g['pending'] = 'open'
+        s['near'] = near
 
 
 # ===================== UI callbacks =====================
